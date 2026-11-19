@@ -1,0 +1,66 @@
+diff --git a/kitty/window.py b/kitty/window.py
+index 16121aa..25799c4 100644
+--- a/kitty/window.py
++++ b/kitty/window.py
+@@ -2024,6 +2024,9 @@ def mouse_handle_click(self, *actions: str) -> None:
+             if a == 'link':
+                 if click_mouse_url(self.os_window_id, self.tab_id, self.id):
+                     break
++                # fork: no URL or OSC 8 link under the mouse, so try a file/folder path
++                if self.click_path_under_mouse():
++                    break
+             if a == 'prompt':
+                 # Do not send move cursor events too soon after the window is
+                 # focused, this is because there are people that click on
+@@ -2035,6 +2038,51 @@ def mouse_handle_click(self, *actions: str) -> None:
+                     self.screen.ignore_bells_for(1)
+                     break
+ 
++    def click_path_under_mouse(self) -> bool:
++        # fork: open the file or folder path under the mouse (absolute, ~/, ./, ../, dir/file
++        # or file.ext, with an optional :line[:col]) when it exists, resolving relative paths
++        # from the foreground program's directory. It opens as a file:// URL so
++        # open-actions.conf decides the app; the line goes in the #fragment.
++        import re
++        from urllib.parse import quote
++        pos = self.current_mouse_position()
++        if not pos:
++            return False
++        x, y = pos['cell_x'], pos['cell_y']
++        try:
++            text = str(self.screen.visual_line(y) or '')
++        except Exception:
++            return False
++        if not text or x >= len(text):
++            return False
++        pat = re.compile(
++            r'(?:~|\.{1,2})?/[\w.@%+~\-/]*[\w@%+~\-/]'
++            r'|[\w@%+~-][\w.@%+~-]*(?:/[\w.@%+~-]+)+/?'
++            r'|[\w@%+~-]+\.[A-Za-z]\w{0,7}'
++        )
++        for m in pat.finditer(text):
++            if not (m.start() <= x < m.end()):
++                continue
++            raw = m.group(0)
++            rest = text[m.end():]
++            lm = re.match(r':(\d+)(?::(\d+))?', rest)
++            if raw.startswith('~'):
++                raw = os.path.expanduser(raw)
++            if not os.path.isabs(raw):
++                cwd = self.get_cwd_of_child() or self.get_cwd_of_child(oldest=True) or self.child.cwd or ''
++                raw = os.path.join(cwd, raw)
++            path = os.path.normpath(raw)
++            if not os.path.exists(path):
++                return False
++            if os.path.isdir(path):
++                path += '/'
++            url = 'file://' + quote(path)
++            if lm:
++                url += '#L' + lm.group(1) + (f':{lm.group(2)}' if lm.group(2) else '')
++            get_boss().open_url(url, cwd=os.path.dirname(path))
++            return True
++        return False
++
+     @ac('mouse', 'Click the URL under the mouse')
+     def mouse_click_url(self) -> None:
+         self.mouse_handle_click('link')
