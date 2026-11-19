@@ -1,31 +1,43 @@
 # kitty-path-click
 
-[kitty](https://github.com/kovidgoyal/kitty) with one patch: clicking a link
-(`mouse_handle_click link`) also opens plain-text **file and folder paths** under the mouse.
+[kitty](https://github.com/kovidgoyal/kitty) with one patch: file and folder paths matched
+by `detect_url_regex` are highlighted on hover and clickable **only when they exist**, and
+they open through the normal `file://` rules of `open-actions.conf`.
 
-Upstream declined regex-based clickable regions
-([kovidgoyal/kitty#3821](https://github.com/kovidgoyal/kitty/issues/3821)). This patch only
-looks at the clicked line, at click time, so it costs nothing while rendering.
+kitty 0.51 added `detect_url_regex`, which turns any regex match into a clickable region.
+A regex loose enough to catch paths also catches `v1.5.2` or `example.com`, so stock kitty
+underlines text that then opens nothing. With this patch an underline means it will open.
 
 ## What the patch does
 
-When a click lands on no URL or OSC 8 hyperlink, kitty looks for a path at the mouse position:
+For text matched by `detect_url_regex` that looks like a path (it has a `/`, a `.` or starts
+with `~`, and no URL scheme):
 
-- `/abs/path`, `~/path`, `./path`, `../path`, `dir/file`, `file.ext`
-- an optional `:line[:col]` suffix
-- relative paths resolve from the foreground program's working directory
-- only paths that exist are opened
+- it is accepted only if the path exists; relative paths resolve from the foreground
+  program's working directory, `~` is expanded, a `:line[:col]` suffix is ignored for the check
+- on click it opens as `file:///abs/path#L12:3`, so the `protocol file` rules in
+  [`open-actions.conf`](https://sw.kovidgoyal.net/kitty/open_actions/) pick the program
 
-The path is opened as a `file://` URL (the line goes in the `#L12:3` fragment), so
-[`open-actions.conf`](https://sw.kovidgoyal.net/kitty/open_actions/) decides which program
-gets it.
+Matches that do not look like paths (issue ids and so on) behave as in stock kitty.
 
-To make Ctrl+click work even while a program grabs the mouse, add to `kitty.conf`:
+## Configuration
+
+`kitty.conf`:
 
 ```conf
+# Paths: /abs ~/x ./x ../x, dir/file, file.ext, each with an optional :line:col
+detect_url_regex (~|\.{1,2})?/[[:alnum:]_.@%+~/-]*[[:alnum:]_@%+~/-](:[0-9]+(:[0-9]+)?)?
+detect_url_regex [[:alnum:]_@%+~-][[:alnum:]_.@%+~-]*(/[[:alnum:]_.@%+~-]+)+/?(:[0-9]+(:[0-9]+)?)?
+detect_url_regex [[:alnum:]_@%+~-]+\.[[:alpha:]][[:alnum:]_]{0,7}(:[0-9]+(:[0-9]+)?)?
+
+# Optional: open links with Ctrl+click only, also while a program grabs the mouse
+mouse_map left click ungrabbed mouse_handle_click selection prompt
 mouse_map ctrl+left press grabbed,ungrabbed discard_event
 mouse_map ctrl+left release grabbed,ungrabbed mouse_handle_click link
 ```
+
+kitty underlines a link only while the held modifiers would open it, so with the mapping
+above the underline shows while Ctrl is held.
 
 ## Install (Arch / Omarchy)
 

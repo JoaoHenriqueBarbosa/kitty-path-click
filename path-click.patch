@@ -1,66 +1,95 @@
+diff --git a/kitty/screen.c b/kitty/screen.c
+index adc25d7..6427a99 100644
+--- a/kitty/screen.c
++++ b/kitty/screen.c
+@@ -5159,6 +5159,18 @@ regex_line_append_row(Line *line, index_type y, ListOfChars *lc) {
+     }
+ }
+ 
++// path-click: let the window veto a regex match, so that text that looks like a
++// file path is only highlighted and clickable when the path actually exists
++static bool
++regex_match_is_accepted(Screen *self, const char *text, size_t len) {
++    if (self->callbacks == Py_None) return true;
++    PyObject *ret = PyObject_CallMethod(self->callbacks, "accept_detected_url", "s#", text, (Py_ssize_t)len);
++    if (ret == NULL) { PyErr_Clear(); return true; }
++    const bool ok = PyObject_IsTrue(ret) == 1;
++    Py_DECREF(ret);
++    return ok;
++}
++
+ static bool
+ detect_url_with_regex(Screen *self, index_type x, index_type y, TextCache *text_cache) {
+     // Match against the soft wrapped line containing y, looking only a limited number of lines above and below y
+@@ -5190,7 +5202,7 @@ detect_url_with_regex(Screen *self, index_type x, index_type y, TextCache *text_
+         while (offset < mouse_end && regexec(re, text + offset, 1, &m, eflags) == 0) {
+             const size_t start = offset + m.rm_so, end = offset + m.rm_eo;
+             if (start >= mouse_end) break;
+-            if (end > mouse_start && end > start) {
++            if (end > mouse_start && end > start && regex_match_is_accepted(self, text + start, end - start)) {
+                 RegexCellPos s = regex_line.positions.items[start], e = regex_line.positions.items[end - 1];
+                 visual_line(self, e.y, &line);
+                 const CPUCell *c = line.cpu_cells + e.x;
 diff --git a/kitty/window.py b/kitty/window.py
-index 16121aa..25799c4 100644
+index cd1eb62..f391879 100644
 --- a/kitty/window.py
 +++ b/kitty/window.py
-@@ -2024,6 +2024,9 @@ def mouse_handle_click(self, *actions: str) -> None:
-             if a == 'link':
-                 if click_mouse_url(self.os_window_id, self.tab_id, self.id):
-                     break
-+                # fork: no URL or OSC 8 link under the mouse, so try a file/folder path
-+                if self.click_path_under_mouse():
-+                    break
-             if a == 'prompt':
-                 # Do not send move cursor events too soon after the window is
-                 # focused, this is because there are people that click on
-@@ -2035,6 +2038,51 @@ def mouse_handle_click(self, *actions: str) -> None:
-                     self.screen.ignore_bells_for(1)
-                     break
+@@ -1579,7 +1579,58 @@ def drag_selection(self) -> None:
+         except OSError as e:
+             log_error(f'Failed to drag selected text: {e}')
  
-+    def click_path_under_mouse(self) -> bool:
-+        # fork: open the file or folder path under the mouse (absolute, ~/, ./, ../, dir/file
-+        # or file.ext, with an optional :line[:col]) when it exists, resolving relative paths
-+        # from the foreground program's directory. It opens as a file:// URL so
-+        # open-actions.conf decides the app; the line goes in the #fragment.
++    # path-click {{{
++    def resolve_detected_path(self, text: str) -> tuple[str, str] | None | bool:
++        """For text matched by detect_url_regex: False if it does not look like a file
++        path, None if it does but no such path exists, else (absolute path, fragment).
++        Paths may be absolute, ~/ or relative to the foreground program's directory,
++        with an optional :line[:col] suffix that becomes the fragment L<line>[:<col>]."""
 +        import re
-+        from urllib.parse import quote
-+        pos = self.current_mouse_position()
-+        if not pos:
++        m = re.fullmatch(r'(.+?)(?::(\d+)(?::(\d+))?)?', text.strip())
++        if m is None:
 +            return False
-+        x, y = pos['cell_x'], pos['cell_y']
-+        try:
-+            text = str(self.screen.visual_line(y) or '')
-+        except Exception:
++        raw, line, col = m.group(1), m.group(2), m.group(3)
++        if '://' in raw or re.match(r'[a-zA-Z][a-zA-Z0-9+.-]*:', raw) or re.search(r'\s', raw):
 +            return False
-+        if not text or x >= len(text):
++        if not (raw.startswith('~') or '/' in raw or '.' in raw):
 +            return False
-+        pat = re.compile(
-+            r'(?:~|\.{1,2})?/[\w.@%+~\-/]*[\w@%+~\-/]'
-+            r'|[\w@%+~-][\w.@%+~-]*(?:/[\w.@%+~-]+)+/?'
-+            r'|[\w@%+~-]+\.[A-Za-z]\w{0,7}'
-+        )
-+        for m in pat.finditer(text):
-+            if not (m.start() <= x < m.end()):
-+                continue
-+            raw = m.group(0)
-+            rest = text[m.end():]
-+            lm = re.match(r':(\d+)(?::(\d+))?', rest)
-+            if raw.startswith('~'):
-+                raw = os.path.expanduser(raw)
-+            if not os.path.isabs(raw):
-+                cwd = self.get_cwd_of_child() or self.get_cwd_of_child(oldest=True) or self.child.cwd or ''
-+                raw = os.path.join(cwd, raw)
-+            path = os.path.normpath(raw)
-+            if not os.path.exists(path):
-+                return False
-+            if os.path.isdir(path):
-+                path += '/'
-+            url = 'file://' + quote(path)
-+            if lm:
-+                url += '#L' + lm.group(1) + (f':{lm.group(2)}' if lm.group(2) else '')
-+            get_boss().open_url(url, cwd=os.path.dirname(path))
-+            return True
-+        return False
++        if raw.startswith('~'):
++            raw = os.path.expanduser(raw)
++        if not os.path.isabs(raw):
++            cwd = self.get_cwd_of_child() or self.get_cwd_of_child(oldest=True) or self.child.cwd or ''
++            raw = os.path.join(cwd, raw)
++        path = os.path.normpath(raw)
++        if not os.path.exists(path):
++            return None
++        if os.path.isdir(path):
++            path += '/'
++        return path, (f'L{line}' + (f':{col}' if col else '')) if line else ''
 +
-     @ac('mouse', 'Click the URL under the mouse')
-     def mouse_click_url(self) -> None:
-         self.mouse_handle_click('link')
++    def accept_detected_url(self, text: str) -> bool:
++        "Called on mouse hover for every detect_url_regex match: reject paths that do not exist"
++        # Hovering asks about the same few candidates on every mouse move
++        cache: dict[str, tuple[float, bool]] = self.__dict__.setdefault('_detected_path_cache', {})
++        now = monotonic()
++        cached = cache.get(text)
++        if cached is not None and now - cached[0] < 1.0:
++            return cached[1]
++        ans = self.resolve_detected_path(text) is not None
++        if len(cache) > 64:
++            cache.clear()
++        cache[text] = now, ans
++        return ans
++    # }}}
++
+     def open_url(self, url: str, hyperlink_id: int, cwd: str | None = None) -> None:
++        if not hyperlink_id:
++            # path-click: a detected file path opens as a file:// URL, so that the
++            # protocol/ext/mime rules in open-actions.conf decide what to do with it
++            resolved = self.resolve_detected_path(url)
++            if resolved:
++                from urllib.parse import quote
++                path, fragment = resolved
++                get_boss().open_url('file://' + quote(path) + (f'#{fragment}' if fragment else ''), cwd=os.path.dirname(path))
++                return
+         boss = get_boss()
+         try:
+             if self.open_url_handler and self.open_url_handler(boss, self, url, hyperlink_id, cwd or ''):
